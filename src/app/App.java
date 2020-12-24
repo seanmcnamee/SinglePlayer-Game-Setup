@@ -1,10 +1,19 @@
 package app;
 
+import app.supportclasses.Input;
+import app.screens.Game;
+import app.screens.HighScoresScreen;
+import app.screens.TitleScreen;
+import app.screens.DeadScreen;
+import app.supportclasses.DisplayScreen;
+import app.supportclasses.GameValues;
+import app.supportclasses.GameValues.GameState;
 
 import java.awt.Canvas;
 import java.awt.Dimension;
 import java.awt.Graphics;
 import java.awt.Toolkit;
+import java.awt.Color;
 import java.awt.image.BufferStrategy;
 import java.awt.BorderLayout;
 
@@ -13,10 +22,11 @@ import javax.swing.JFrame;
 /**
  * Highest level Game logic for the game
  * Deals with the differing scenes (mainscreen, settings, etc).
+ * @author Sean McNamee
  */
 public class App extends Canvas implements Runnable {
 
-    private static final long serialVersionUID = 5430513214412853815L;
+	private static final long serialVersionUID = 1L;
     /**
      * Starts everything.
      */
@@ -30,8 +40,7 @@ public class App extends Canvas implements Runnable {
     private Input gameInputs;
 
     //Screen specific variables
-    private DisplayScreen game;
-    private DisplayScreen titleScreen;
+    private DisplayScreen titleScreen, game, deadScreen, highScores;
     
     /**
      * Creates all the main components of the Application
@@ -41,15 +50,21 @@ public class App extends Canvas implements Runnable {
         gameValues = new GameValues();
         setupGUI();
         inputSetup();
+        this.createBufferStrategy(2); // Sets the canvas buffer count TODO Change to triple buffer if rendering is choppy
         
         //Different Screens setup
-        game = new Game(frame);
-        titleScreen = new TitleScreen(frame);
+        deadScreen = new DeadScreen(frame, gameValues);
+        game = new Game(frame, gameValues, deadScreen);
+        highScores = new HighScoresScreen(frame, gameValues);
+        titleScreen = new TitleScreen(frame, gameValues, game, highScores);
+        ((HighScoresScreen)highScores).setTitleScreen(titleScreen);
+        ((DeadScreen)deadScreen).setHighScores((HighScoresScreen)highScores);
 
         //Start displaying/updating everything
         gameValues.currentScreen = titleScreen;
         gameValues.gameState = GameState.RUNNING;
         new Thread(this).start();
+        frame.setVisible(true);
     }
 
     /**
@@ -61,11 +76,10 @@ public class App extends Canvas implements Runnable {
         Dimension screenSize = Toolkit.getDefaultToolkit().getScreenSize();
         
         System.out.println(screenSize.getWidth() + " x " + screenSize.getHeight() + " : Monitor Size");
-		//System.out.println(screenSize.getWidth() / constants.SCALE + ", " + screenSize.getHeight() / constants.SCALE + " :: Yuh");
 
-		setMinimumSize(new Dimension((int)screenSize.getWidth()/2, (int)screenSize.getHeight()/2));
+		setMinimumSize(new Dimension((int)gameValues.WIDTH_SCALE_1, (int)gameValues.HEIGHT_SCALE_1));
 		setMaximumSize(new Dimension((int)screenSize.getWidth(), (int)screenSize.getHeight()));
-		setPreferredSize(new Dimension((int)screenSize.getWidth()/2, (int)screenSize.getHeight()/2));
+		setPreferredSize(new Dimension((int)gameValues.WIDTH_SCALE_1, (int)gameValues.HEIGHT_SCALE_1));
 
 		// Create the GUI itself
 		frame = new JFrame(gameValues.NAME);
@@ -81,10 +95,8 @@ public class App extends Canvas implements Runnable {
 		frame.setLocationRelativeTo(null);
 
 		frame.setLocation((int)(screenSize.getWidth() - frame.getWidth())/2, (int)(screenSize.getHeight() - frame.getHeight())/2);
-        frame.setVisible(true);
-
-        //frame.setExtendedState(JFrame.MAXIMIZED_BOTH);
         
+        System.out.println("frame size: " + frame.getContentPane().getWidth() + ", " + frame.getContentPane().getHeight());
     }
 
     /**
@@ -92,10 +104,12 @@ public class App extends Canvas implements Runnable {
      */
     private void inputSetup(){
         requestFocus();
-        gameInputs = new Input(gameValues);
+        gameInputs = new Input(gameValues, frame);
         addKeyListener(gameInputs);
         addMouseListener(gameInputs);
+        addMouseMotionListener(gameInputs);
         addMouseWheelListener(gameInputs);
+        frame.addComponentListener(gameInputs);
     }
 
     @Override
@@ -106,14 +120,14 @@ public class App extends Canvas implements Runnable {
 
         System.out.println("In the game!");
 
-        //Sets the specified FPS according to gameValues.nanoSecondsPerTick
+        //Sets the specified FPS according to gameValues.NANO_SECONDS_PER_TICK
         long previousNano = System.nanoTime();
         double totalNano = 0;
 
         //Keep track of tps and fps
         long previousMillis = System.currentTimeMillis();
 
-        //Only update the game if its running
+        //Only update/render the application if its running
         while (gameValues.gameState == GameState.RUNNING) {
 
             //Only worry about updating game logic when playing the game
@@ -123,7 +137,7 @@ public class App extends Canvas implements Runnable {
                 previousNano = currentNano;
 
                 //Each tick updates the game logic
-                if (totalNano >= gameValues.nanoSecondsPerTick) {
+                if (totalNano >= gameValues.NANO_SECONDS_PER_TICK) {
                     totalNano = 0;
                     gameValues.ticksPerSeconds++;
                     ((Game)game).tick();
@@ -136,8 +150,10 @@ public class App extends Canvas implements Runnable {
             
             //Once a second, show the fps and tps of application loop
             long currentMillis = System.currentTimeMillis();
-            if (currentMillis - previousMillis >= gameValues.oneSecondInMillis) {
-                System.out.println("FPS: " + gameValues.framesPerSecond + ", TPS: " + gameValues.ticksPerSeconds);
+            double secondsBetween = 5.0;
+            if (currentMillis - previousMillis >= secondsBetween*gameValues.ONE_SEC_IN_MILLIS) {
+                System.out.println("FPS: " + (gameValues.framesPerSecond/secondsBetween) + ", TPS: " + (gameValues.ticksPerSeconds/secondsBetween) +
+                    ((gameValues.debugMode)? ", ScreenScale: " + gameValues.gameScale:""));
                 previousMillis = currentMillis;
                 gameValues.framesPerSecond = gameValues.ticksPerSeconds = 0;
             }
@@ -145,25 +161,28 @@ public class App extends Canvas implements Runnable {
     }
 
     /**
-     * Handles all the graphics of the game, and calls the current DisplayScreens to do their part
+     * Handles all the graphics of the application, and calls the current DisplayScreens to do their part
      */
     public void render() {
-        // Printing to screen
+        // Everything drawn will go through Graphics or some type of Graphics
 		BufferStrategy bs = getBufferStrategy();
-		if (bs == null) {
-			createBufferStrategy(2); // TODO Change to triple buffer if needed
-			return;
-		}
-		// Everything drawn will go through Graphics or some type of Graphics
         Graphics g = bs.getDrawGraphics();
         
-        //Print whatever has to be to the screen
+        //Print whatever has to be to the screen (default black screen behind)
+        g.setColor(Color.black);
+        g.fillRect(0, 0, frame.getContentPane().getWidth(), frame.getContentPane().getHeight());
+
+        this.gameValues.fieldXSize = gameValues.WIDTH_SCALE_1*(gameValues.gameScale);
+        this.gameValues.fieldYSize = gameValues.HEIGHT_SCALE_1*(gameValues.gameScale);
+        double excessWidth = gameValues.frameWidth-(gameValues.WIDTH_SCALE_1*gameValues.gameScale);
+        double excessHeight = gameValues.frameHeight-(gameValues.HEIGHT_SCALE_1*gameValues.gameScale);
+        this.gameValues.fieldXStart = excessWidth/2.0;
+        this.gameValues.fieldYStart = excessHeight/2.0;
+
         gameValues.currentScreen.render(g);
 
         //Closes the graphics and shows the screen
         g.dispose();
 		bs.show();
     }
-
-
 }
